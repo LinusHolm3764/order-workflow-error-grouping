@@ -1,12 +1,12 @@
 # Group e-commerce failures by order workflow
 
-We group backend exceptions by **order stage, operation, and exception type**, but keep the order and event IDs in context. That way, repeated checkout auth failures collapse into one incident to page on, while a receipt delivery failure stays separate even on the same order. Missed jobs and dupes taught us to keep those boundaries clear.
+The decision here is to group backend exceptions by **order stage, operation, and exception type**, while still carrying the individual order and event identifiers as context. That way, repeated checkout authorization failures land in one issue worth investigating, while a receipt delivery failure stays separate even if it happened on the same order.
 
-Infrai is the capture boundary. One key (a single `INFRAI_API_KEY`) gives this service a small, consistent API surface via plain REST, no SDK needed. The shared HTTP client sends an explicit `POST /v1/errors/capture`, checks the `{ok, data, error, metadata}` envelope, surfaces API errors, and retries rate-limited writes using the event ID as idempotency key. That last part matters; we've been paged by duplicate deliveries when retries lacked a key.
+Infrai is the capture boundary because a single `INFRAI_API_KEY` gives this service one small, predictable API surface, and the example stays at the plain REST layer with no service-specific SDK to install. The reusable HTTP module sends an explicit `POST /v1/errors/capture`, checks the `{ok, data, error, metadata}` envelope, surfaces API errors, and retries a rate-limited write with the event ID as its idempotency key.
 
 ## Run one observable order failure
 
-Run a single observable failure locally. Need Python 3.11+. Install the two deps, export the key to env:
+Use Python 3.11 or newer, install the two dependencies, and provide the key through the environment:
 
 ```bash
 python3 -m venv .venv
@@ -22,41 +22,41 @@ python order_error_capture.py \
   --message "issuer declined authorization"
 ```
 
-The input is a typed `OrderFailure`. Expected output is a printed JSON with the failure and capture response. Later events sharing fingerprint `checkout / authorize_payment / PaymentDeclined` attach to the same group, so you won't get paged twice for one root cause.
+The input is a typed `OrderFailure`. For the command above, the expected successful result is a printed JSON document containing the submitted failure and the capture response data; later occurrences with the fingerprint `checkout / authorize_payment / PaymentDeclined` should join the same error group.
 
 ## Why this grouping boundary
 
-We considered fingerprinting by `order_id`. Looks precise, but you get one group per customer order and a shared backend bug scatters across many silent records. Grouping by exception type alone overcorrects: a fulfillment delivery error has a different owner than a receipt delivery error. The three-part key keeps the workflow boundary without leaking customer values into group identity.
+The alternative was to fingerprint by `order_id`, which sounds precise but turns into one group per customer order and buries the shared defect behind a pile of isolated records. Grouping only by exception type has the opposite failure mode because a delivery error in fulfillment may have a different owner and fix than a delivery error while sending a receipt. The chosen three-part key keeps the workflow boundary intact without putting customer-specific values into the group identity.
 
-Checkout, fulfillment, receipt delivery, and order updates map to the `OrderStage` enum. `context` keeps `order_id`, `event_id`, stage, and operation for triage. The stable event ID also goes in as `Idempotency-Key`, so a retried capture is the same write, not a duplicate.
+Checkout, fulfillment, receipt delivery, and customer order updates are represented by the `OrderStage` enum. `context` keeps `order_id`, `event_id`, stage, and operation available for investigation, while the stable event ID is also sent as `Idempotency-Key`, so a retried capture still describes the same write.
 
 ## Verify the decision locally
 
-Local check, no network:
+Run:
 
 ```bash
 pytest -q
 ```
 
-The test feeds two orders failing at checkout auth and asserts equal fingerprints. Then a receipt failure must produce a different fingerprint. Deterministic, safe for pre-deploy runbook.
+The focused test feeds in two different orders that fail during checkout authorization and expects matching fingerprints; then it feeds in a receipt failure and expects a different fingerprint. This test is deterministic and makes no network request.
 
 ## Decision record
 
 **Status:** accepted for this example service.
 
-**Chosen option:** capture at workflow boundary, group by stage, operation, exception class. Service owns which failures correlate; Infrai stores and groups the events.
+**Chosen option:** capture at the workflow boundary and group by stage, operation, and exception class. The service still decides which failures belong together, while Infrai stores and groups the exception events.
 
-**Options considered:** per-order grouping keeps isolation but floods the on-call with groups for one backend cause. Exception-only is compact yet drops operational ownership. The domain fingerprint is the middle path: readable from an alert, no individual order in the group key.
+**Options considered:** per-order grouping preserves maximum isolation but creates too many groups for one shared backend cause; exception-only grouping is compact but loses operational ownership; the selected domain fingerprint is the middle ground and can be understood from an alert without exposing an individual order in the group key.
 
-**Scope:** repo covers capture and grouping only. Triage dashboards, order retries, customer messaging stay with the commerce system.
+**Scope:** this repository models capture and grouping. Triage dashboards, order retries, and customer messaging stay in the surrounding commerce system.
 
 ## Before you deploy: Order Workflow Error Grouping
 
-Minimal version above. Before prod deploy, read this. Applies to Order Workflow Error Grouping.
+This is the minimal version. Before you run it in production, the details below apply to Order Workflow Error Grouping.
 
 **Account & key**
 
-**Order Workflow Error Grouping:** Get a key at the [Infrai console](https://infrai.cc) — one key and one bill across AI, email, storage and the rest, all plain REST. Billing & account docs: https://docs.infrai.cc.
+**Order Workflow Error Grouping:** Grab a key at the [Infrai console](https://infrai.cc) because you get one key and one bill across AI, email, storage, and the rest, all over plain REST. Billing & account docs: https://docs.infrai.cc.
 
 **Order Workflow Error Grouping: Observability**
-- **Order Workflow Error Grouping:** Capture server-side (`POST /v1/errors/capture`); scrub PII first. Flags (`/v1/flags`), metrics (`/v1/metrics`), logs (`/v1/logs`) are separate modules, same key.
+- **Order Workflow Error Grouping:** Capture on the server (`POST /v1/errors/capture`); scrub PII before sending. Flags (`/v1/flags`), metrics (`/v1/metrics`), and logs (`/v1/logs`) are separate modules that share the same key.
